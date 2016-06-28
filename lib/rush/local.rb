@@ -1,6 +1,7 @@
 require 'fileutils'
 require 'yaml'
 require 'timeout'
+require 'session'
 
 # Rush::Box uses a connection object to execute all rush commands.  If the box
 # is local, Rush::Connection::Local is created.  The local connection is the
@@ -75,6 +76,27 @@ class Rush::Connection::Local
     true
   end
 
+  # Create a hard link to another file
+  def ln(src, dst, options = {})
+    raise(Rush::DoesNotExist, src) unless File.exists?(src)
+    raise(Rush::DoesNotExist, File.dirname(dst)) unless File.exists?(File.dirname(dst))
+    FileUtils.ln(src, dst, options)
+    true
+  end
+
+  # Create a symbolic link to another file
+  def ln_s(src, dst, options = {})
+    raise(Rush::DoesNotExist, src) unless File.exists?(src)
+    raise(Rush::DoesNotExist, File.dirname(dst)) unless File.exists?(File.dirname(dst))
+    FileUtils.ln_s(src, dst, options)
+    true
+  end
+
+  # Is this path a symlink?
+  def symlink?(path)
+    File.symlink? path
+  end
+
   # Create an in-memory archive (tgz) of a file or dir, which can be
   # transmitted to another server for a copy or move.  Note that archive
   # operations have the dir name implicit in the archive.
@@ -128,10 +150,24 @@ class Rush::Connection::Local
     access.apply(full_path)
   end
 
+  # A frontend for FileUtils::chown
+  #
+  def chown( full_path, user=nil, group=nil, options={} )
+    if options[:recursive]
+      FileUtils.chown_R(user, group, full_path, options)
+    else
+      FileUtils.chown(user, group, full_path, options)
+    end
+  end
+
   # Fetch the size of a dir, since a standard file stat does not include the
   # size of the contents.
   def size(full_path)
-    `du -sb #{Rush.quote(full_path)}`.match(/(\d+)/)[1].to_i
+    if RUBY_PLATFORM.match(/darwin/)
+      `find #{Rush.quote(full_path)} -print0 | xargs -0 stat -f%z`.split(/\n/).map(&:to_i).reduce(:+)
+    else
+      `du -sb #{Rush.quote(full_path)}`.match(/(\d+)/)[1].to_i
+    end
   end
 
   # Get the list of processes as an array of hashes.
@@ -142,7 +178,7 @@ class Rush::Connection::Local
       windows_processes
     else
       os_x_processes
-    end
+    end.uniq
   end
 
   # Process list on Linux using /proc.
@@ -285,7 +321,6 @@ class Rush::Connection::Local
 
   def bash(command, user=nil, background=false, reset_environment=false)
     return bash_background(command, user, reset_environment) if background
-    require 'session'
     sh = Session::Bash.new
     shell = reset_environment ? "env -i bash" : "bash"
     out, err = sh.execute sudo(user, shell), :stdin => command
@@ -340,11 +375,14 @@ class Rush::Connection::Local
       when 'create_dir'     then create_dir(params[:full_path])
       when 'rename'         then rename(params[:path], params[:name], params[:new_name])
       when 'copy'           then copy(params[:src], params[:dst])
+      when 'ln'             then ln(params[:src], params[:dst], params[:options])
+      when 'ln_s'           then ln_s(params[:src], params[:dst], params[:options])
       when 'read_archive'   then read_archive(params[:full_path])
       when 'write_archive'  then write_archive(params[:payload], params[:dir])
       when 'index'          then index(params[:base_path], params[:glob]).join("\n") + "\n"
       when 'stat'           then YAML.dump(stat(params[:full_path]))
       when 'set_access'     then set_access(params[:full_path], Rush::Access.from_hash(params))
+      when 'chown'          then chown(params[:full_path], params[:user], params[:group], params[:options])
       when 'size'           then size(params[:full_path])
       when 'processes'      then YAML.dump(processes)
       when 'process_alive'  then process_alive(params[:pid]) ? '1' : '0'
